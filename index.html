@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dragon</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #15161c; }
+    canvas { display: block; touch-action: none; } /* dragging a finger won't scroll or zoom the page */
+  </style>
+</head>
+<body>
+  <canvas id="board"></canvas>
+
+  <script>
+    // --- get the drawing board and its tools ---
+    const board = document.getElementById("board");
+    const pen = board.getContext("2d");
+
+    // --- make the board fill the whole window, and work out the size unit ---
+    // every size and speed below is written for an 800-pixel screen and multiplied by `unit`,
+    // so on a phone the whole scene shrinks together, like zooming a picture
+    const designSize = 800;   // the screen size the numbers below were tuned on
+    const minUnit = 0.45;     // never smaller than this, so it stays visible on tiny phones
+    const maxUnit = 1.6;      // never bigger than this, so it doesn't get huge on big monitors
+    let unit = 1;
+    let screenW = 0;          // the window's size in CSS pixels (what the mouse and finger use)
+    let screenH = 0;
+    function resize() {
+      screenW = window.innerWidth;
+      screenH = window.innerHeight;
+      unit = Math.min(maxUnit, Math.max(minUnit, Math.min(screenW, screenH) / designSize));
+      // phones have 2-3 real pixels per CSS pixel: draw at that resolution so pictures stay sharp
+      const dpr = window.devicePixelRatio || 1;
+      board.width = screenW * dpr;
+      board.height = screenH * dpr;
+      board.style.width = screenW + "px";
+      board.style.height = screenH + "px";
+      pen.setTransform(dpr, 0, 0, dpr, 0, 0);  // then draw in CSS pixels as usual
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    // --- the pictures (drawn facing RIGHT, belly down; the tail tip points LEFT) ---
+    function loadPicture(file) {
+      const img = new Image();
+      img.src = file;   // the file sits next to index.html
+      return img;
+    }
+    const headImg = loadPicture("head.png");
+    const bodyImg = loadPicture("body.png");
+    const body2Img = loadPicture("body_2.png");
+    const bodyPattern = [bodyImg, body2Img];
+    const tailImg = loadPicture("tail.png");
+    const cageBackImg = loadPicture("cage_back.png");        // behind the dragon
+    const cageFrontImg = loadPicture("cage_front.png");      // in front of the dragon while it's locked in
+    const lockImg = loadPicture("lock_on.png");              // the lock, drawn over the closed front
+    const cageOpenImg = loadPicture("cage_front_open.png");  // the front after the lock is pressed
+
+    // --- the story: "caged" → "opening" → "escaping" → "free" ---
+    let state = "caged";
+    let stateTime = 0;          // frames since the state started (counted at 60 frames a second)
+    const escapeFrames = 300;   // how long the escape lasts (60 frames ≈ 1 second)
+    const cageFadesAway = false; // false = the open cage stays on screen after the escape
+    const fadeFrames = 120;     // after the escape, how long the cage takes to fade away
+    const cagedScale = 0.6;    // the dragon's size while caged (1 = full size); it grows as it escapes
+    let dragonScale = cagedScale;
+    const exitLift = 0.7;       // where it leaves the loop, and so how upward it flies out (0 = bottom, flying straight right; bigger = higher and steeper; keep under 1.2)
+    let dragonIsOut = false;    // becomes true once every part has left the cage; then the open front moves behind
+
+    // --- where the cage is: centred, and sized to fit the screen ---
+    const cageFill = 0.3;       // the cage picture is 30% of the design screen (scaled by `unit` like the dragon)
+    const cagePadding = 20;     // gap between the cage and the screen's edges
+    const minLockTap = 22;      // the lock's tap circle is at least this radius, so a finger can hit it
+    const lockSpot = { x: 0.73, y: 0.53, r: 0.1 };  // the lock on the cage picture, as fractions of its size
+    function cage() {
+      const size = designSize * cageFill * unit;
+      const pad = cagePadding * unit;
+      return {
+        x: pad + size / 2,                            // bottom-left corner
+        y: screenH - pad - size / 2,
+        size: size,
+        orbit: size * 0.25,                           // how wide the dragon circles inside
+        lockX: pad + lockSpot.x * size,
+        lockY: screenH - pad - size + lockSpot.y * size,
+        lockR: Math.max(lockSpot.r * size, minLockTap),
+      };
+    }
+
+    // --- the head's information ---
+    let x = cage().x + cage().orbit;   // start inside the cage
+    let y = cage().y;
+    let angle = -Math.PI / 2;          // direction it's heading, in radians (0 = right, 1.57 = down, -1.57 = up)
+    const speed = 2.5;   // pixels per frame (on the design screen, at 60 frames a second)
+    const escapeSpeed = speed;             // a burst of speed while escaping
+    const radius = 30; // size of the head
+    const margin = 50; // how far it goes past an edge before it wraps (half the head picture or more)
+
+    // --- side view: each part rolls over on its own when it turns to fly left,
+    //     so the belly stays down and the roll travels down the body like a wave ---
+    const flipPoint = 0.6;  // only roll once it's clearly turned (about 20° past straight up/down)
+    const rollSpeed = 0.08;  // how fast a roll happens (1 = instant, 0.08 = about 25 frames)
+    const head = { facingLeft: false, roll: 1 };  // roll: 1 = belly down facing right, -1 = flipped
+
+    // --- the head picture turns smoothly toward the heading, instead of following
+    //     every tiny random wobble (which made it look like it was shaking) ---
+    let headLook = angle;        // the direction the head picture is drawn facing
+    const headSmoothing = 0.12;  // 1 = no smoothing (shaky), smaller = calmer head
+
+    // --- waving settings ---
+    let time = 0;              // counts frames, drives the wave
+    const waveSpeed = 0.03;    // how fast it swings side to side (bigger = quicker wiggles)
+    const waveAmount = 0.02;   // how hard it swings (bigger = wider curves)
+    const wander = 0.06;       // a little randomness so its path never repeats exactly
+
+    // --- the body: a list of segments that follow the head ---
+    const segmentCount = 30; // how many segments once it's free
+    const cagedSegments = 20; // how many segments while it's in the cage
+    const growEvery = 4;      // after the lock opens, add one segment at the tail every 4 frames
+    let growTimer = 0;
+    const spacing = 20;      // distance between neighbouring segments
+    const body = [];
+    for (let i = 1; i <= cagedSegments; i++) {
+      // start them curled round the cage's circle, behind the head
+      const c = cage();
+      const around = i * spacing * unit * cagedScale / c.orbit;
+      body.push({
+        x: c.x + Math.cos(around) * c.orbit,
+        y: c.y + Math.sin(around) * c.orbit,
+        facingLeft: false,  // every segment remembers its own facing...
+        roll: 1,            // ...and how far through a roll it is
+      });
+    }
+
+    // --- edge settings ---
+    const bounceChance = 0.3;  // 1.0 = always bounce, 0.0 = always wrap, 0.5 = half the time bounce
+    let passingSide = false;   // true while it's sliding out through a left/right wall
+    let passingTopBottom = false; // same, for the ceiling and floor
+    const edgeZone = radius + 25; // (× unit) it starts deciding (bounce or wrap) this close to a wall
+    const bounceTurnRate = 0.07;  // a bounce is a quick smooth turn, not an instant flip (bigger = sharper)
+    let bounceTarget = null;      // the direction it's turning toward during a bounce (null = not bouncing)
+
+    // --- finger / mouse settings ---
+    const nudgeAmount = 0.4;   // how far one tap turns it toward the finger (radians)
+    const turnRate = 0.05;     // how fast it turns while you keep pressing
+    const orbitRadius = 115;    // while pressed, it circles the finger at about this distance
+    let pressed = false;       // is a finger / mouse button down right now?
+    let targetX = 0;           // where the finger is
+    let targetY = 0;
+    let orbitSide = 1;         // 1 or -1: which way round it circles
+
+    // the smallest turn that gets you from direction b to direction a (between -π and π)
+    function angleBetween(a, b) {
+      return Math.atan2(Math.sin(a - b), Math.cos(a - b));
+    }
+
+    // turn the heading toward `wanted`, but by no more than `maxTurn`
+    function turnToward(wanted, maxTurn) {
+      const turn = angleBetween(wanted, angle);
+      angle = angle + Math.max(-maxTurn, Math.min(maxTurn, turn));
+    }
+
+    // finger down / mouse pressed: one nudge toward it, and start following
+    board.addEventListener("pointerdown", (event) => {
+      if (state === "caged") {
+        // while caged, only the lock responds
+        const c = cage();
+        if (Math.hypot(event.clientX - c.lockX, event.clientY - c.lockY) < c.lockR) {
+          state = "opening";   // door's open, but it keeps circling until it faces the door
+          stateTime = 0;
+          board.style.cursor = "default";
+        }
+        return;
+      }
+      if (state === "opening" || state === "escaping") return;  // no steering until it's out
+      pressed = true;
+      targetX = event.clientX;
+      targetY = event.clientY;
+      const toTarget = Math.atan2(targetY - y, targetX - x);
+      // circle the way it's already turning, so it doesn't make a U-turn
+      orbitSide = angleBetween(angle, toTarget) >= 0 ? 1 : -1;
+      turnToward(toTarget, nudgeAmount);
+      board.setPointerCapture(event.pointerId); // keep getting moves even off the canvas
+    });
+
+    // finger dragged / mouse moved: the target moves with it
+    board.addEventListener("pointermove", (event) => {
+      if (state === "caged") {
+        // show a pointing hand when the mouse is over the lock
+        const c = cage();
+        const overLock = Math.hypot(event.clientX - c.lockX, event.clientY - c.lockY) < c.lockR;
+        board.style.cursor = overLock ? "pointer" : "default";
+        return;
+      }
+      if (!pressed) return;
+      targetX = event.clientX;
+      targetY = event.clientY;
+    });
+
+    // finger lifted / mouse released: back to free flying
+    board.addEventListener("pointerup", () => { pressed = false; });
+    board.addEventListener("pointercancel", () => { pressed = false; });
+
+    // while pressed: steer toward the finger, then circle around it
+    function steerTowardFinger() {
+      if (!pressed) return;
+      circleAround(targetX, targetY, orbitRadius * unit, orbitSide);
+    }
+
+    // steer toward a point, then circle it at `orbit` distance (used for the finger and the cage)
+    function circleAround(cx, cy, orbit, side) {
+      const dx = cx - x;
+      const dy = cy - y;
+      const distance = Math.hypot(dx, dy);
+      const toTarget = Math.atan2(dy, dx);
+      // far away → aim straight at it; at orbit distance → aim sideways (a quarter turn),
+      // which makes it go round; closer than that → aim a bit outward
+      const sideways = (Math.PI / 2) * Math.min(orbit / distance, 1.5);
+      turnToward(toTarget + side * sideways, turnRate * dt);
+    }
+
+    // --- when the head jumps to the other side, the body jumps with it ---
+    function moveEverything(dx, dy) {
+      x = x + dx;
+      y = y + dy;
+      for (const seg of body) {
+        seg.x = seg.x + dx;
+        seg.y = seg.y + dy;
+      }
+    }
+
+    // --- what happens at the edges of the screen ---
+    function checkEdges() {
+      const w = screenW;
+      const h = screenH;
+      const zone = edgeZone * unit;
+      const m = margin * unit;
+      const movingRight = Math.cos(angle) > 0;
+      const movingDown = Math.sin(angle) > 0;
+
+      // back fully inside? then the next wall touch gets a fresh roll
+      // (needed because the wave can turn it around half way through a wall)
+      if (x - zone > 0 && x + zone < w) passingSide = false;
+      if (y - zone > 0 && y + zone < h) passingTopBottom = false;
+
+      // near the left or right wall, while heading into it? (and not already bouncing)
+      const touchingSide = (movingRight && x + zone >= w) || (!movingRight && x - zone <= 0);
+      if (touchingSide && !passingSide && bounceTarget === null) {
+        if (!pressed && Math.random() < bounceChance) {  // never bounce while circling the cursor, only wrap
+          bounceTarget = Math.PI - angle;  // bounce: start turning toward the mirrored direction
+        } else {
+          passingSide = true;       // wrap: let it slide out
+        }
+      }
+      // fully gone off one side → appear on the other side
+      const spanX = w + m * 2;
+      if (x > w + m) { moveEverything(-spanX, 0); passingSide = false; }
+      if (x < -m)    { moveEverything(spanX, 0);  passingSide = false; }
+
+      // near the ceiling or floor, while heading into it? (and not already bouncing)
+      const touchingTopBottom = (movingDown && y + zone >= h) || (!movingDown && y - zone <= 0);
+      if (touchingTopBottom && !passingTopBottom && bounceTarget === null) {
+        if (!pressed && Math.random() < bounceChance) {  // never bounce while circling the cursor, only wrap
+          bounceTarget = -angle;           // bounce: start turning toward the mirrored direction
+        } else {
+          passingTopBottom = true;  // wrap: let it slide out
+        }
+      }
+      // fully gone off the top or bottom → appear on the other side
+      const spanY = h + m * 2;
+      if (y > h + m) { moveEverything(0, -spanY); passingTopBottom = false; }
+      if (y < -m)    { moveEverything(0, spanY);  passingTopBottom = false; }
+    }
+
+    // --- each segment walks toward the one in front of it ---
+    function followTheLeader() {
+      let leader = { x: x, y: y };  // the first segment follows the head
+      for (const seg of body) {
+        const dx = seg.x - leader.x;
+        const dy = seg.y - leader.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance > 0) {
+          // put the segment exactly `spacing` away from its leader, on the same line
+          seg.x = leader.x + (dx / distance) * spacing * unit * dragonScale;
+          seg.y = leader.y + (dy / distance) * spacing * unit * dragonScale;
+        }
+        leader = seg;  // the next segment follows this one
+      }
+    }
+
+    // --- in and around the cage, each segment sits exactly on the head's old path instead,
+    //     so the body goes where the head went (out the door) and can't swing through the bars ---
+    const trail = [{ x: x, y: y }, ...body.map((seg) => ({ x: seg.x, y: seg.y }))];  // head's past positions, newest first
+    function followThePath() {
+      trail.unshift({ x: x, y: y });
+      const gap = spacing * unit * dragonScale;
+      let walked = 0;      // how far back along the path we are
+      let next = 0;        // the next segment to place
+      for (let j = 1; j < trail.length && next < body.length; j++) {
+        const a = trail[j - 1];
+        const b = trail[j];
+        const len = Math.hypot(b.x - a.x, b.y - a.y);
+        if (len === 0) continue;
+        while (next < body.length && walked + len >= gap * (next + 1)) {
+          const t = (gap * (next + 1) - walked) / len;   // how far between a and b
+          body[next].x = a.x + (b.x - a.x) * t;
+          body[next].y = a.y + (b.y - a.y) * t;
+          next++;
+        }
+        walked = walked + len;
+        if (next === body.length) trail.length = j + 1;  // forget path nobody needs any more
+      }
+      const end = trail[trail.length - 1];
+      for (; next < body.length; next++) { body[next].x = end.x; body[next].y = end.y; }  // new segments wait at the path's end
+    }
+
+    // --- wrap a position onto the screen, so a body that's half way
+    //     through an edge shows up partly on each side ---
+    //     `headPos` is the head's position on the same axis: while circling the cursor
+    //     the head may go past the wall, and the wrap area shifts to keep the head
+    //     (and the body around it) on its real side instead of folding to the other side
+    function onScreen(value, size, headPos) {
+      const m = margin * unit;
+      const span = size + m * 2;
+      let start = -m;                                       // normal wrap area: -margin ... size + margin
+      if (headPos < start) start = headPos;                 // head went past the left/top edge
+      if (headPos > start + span) start = headPos - span;   // head went past the right/bottom edge
+      return ((value - start) % span + span) % span + start;
+    }
+
+    // --- draw a picture centred on (cx, cy), turned to face `direction` ---
+    function drawPicture(img, cx, cy, direction, size, roll) {
+      if (!img.complete || img.naturalWidth === 0) return;  // not loaded (or missing file): skip it
+      pen.save();                                   // remember the paper's normal position
+      pen.translate(onScreen(cx, screenW, x), onScreen(cy, screenH, y)); // move the paper there
+      pen.rotate(direction);                        // turn the paper to face the way it's going
+      // squash top-to-bottom by `roll`: 1 = normal, 0 = edge-on, -1 = mirrored (belly stays down).
+      // never quite 0, so it doesn't vanish half way through a roll
+      const squash = Math.max(Math.abs(roll), 0.25);
+      pen.scale(1, roll >= 0 ? squash : -squash);
+      pen.drawImage(img, -size / 2, -size / 2, size, size);  // draw centred on that spot
+      pen.restore();                                // put the paper back
+    }
+
+    // --- decide which way up one part is, from its own direction, and roll it smoothly there ---
+    function updateRoll(part, direction) {
+      const sideways = Math.cos(direction);  // +1 = flying right, -1 = flying left, 0 = straight up/down
+      if (sideways < -flipPoint) part.facingLeft = true;
+      if (sideways > flipPoint) part.facingLeft = false;
+      // in between, keep whatever it was, so it doesn't flicker while wiggling up or down
+
+      const target = part.facingLeft ? -1 : 1;
+      if (part.roll < target) part.roll = Math.min(target, part.roll + rollSpeed * dt);
+      if (part.roll > target) part.roll = Math.max(target, part.roll - rollSpeed * dt);
+    }
+
+    // --- draw a cage picture, centred on the cage, see-through by `alpha` (1 = solid) ---
+    function drawCage(img, alpha) {
+      if (!img.complete || img.naturalWidth === 0 || alpha <= 0) return;
+      const c = cage();
+      pen.globalAlpha = alpha;
+      pen.drawImage(img, c.x - c.size / 2, c.y - c.size / 2, c.size, c.size);
+      pen.globalAlpha = 1;
+    }
+
+    // --- true when the head and every body part are outside the cage's square ---
+    function isOutOfCage() {
+      const c = cage();
+      const half = c.size / 2;
+      const outside = (p) => Math.abs(p.x - c.x) > half || Math.abs(p.y - c.y) > half;
+      return outside({ x: x, y: y }) && body.every(outside);
+    }
+
+    // --- what the story needs this frame: where to steer, how fast, which state next ---
+    function updateState() {
+      stateTime = stateTime + dt;
+      const c = cage();
+      growTimer = growTimer + dt;
+      if ((state === "escaping" || state === "free") && body.length < segmentCount && growTimer >= growEvery) {
+        growTimer = 0;
+        const last = body[body.length - 1];
+        body.push({ x: last.x, y: last.y, facingLeft: last.facingLeft, roll: last.roll });  // grow a new tail segment
+      }
+      if (state === "caged") {
+        circleAround(c.x, c.y, c.orbit, 1);           // fly round and round inside
+      } else if (state === "opening") {
+        // keep circling until it's low in the cage and pointing at the door, so nothing leaves through the roof
+        circleAround(c.x, c.y, c.orbit, 1);
+        const facingDoor = Math.abs(angleBetween(-exitLift, angle)) < 0.1;
+        if (facingDoor && y > c.y) { state = "escaping"; stateTime = 0; }
+      } else if (state === "escaping") {
+        // fly out through the door: no steering, it keeps the heading it left with
+        const progress = Math.min(1, stateTime / escapeFrames);       // 0 → 1 during the escape
+        dragonScale = cagedScale + (1 - cagedScale) * progress;     // grow to full size
+        if (progress === 1) { state = "free"; stateTime = 0; }
+      }
+    }
+
+    // --- one page of the flipbook ---
+    // `dt` = how many 60-per-second frames passed since the last page: 1 on a 60 Hz screen,
+    // 0.5 on a 120 Hz phone. Every per-frame step is multiplied by it, so speed is the same everywhere
+    let dt = 1;
+    let lastTime = null;
+    function frame(now) {
+      if (now !== undefined && lastTime !== null) dt = Math.min((now - lastTime) / (1000 / 60), 3);  // cap: a hidden tab doesn't jump
+      if (now !== undefined) lastTime = now;
+      time = time + dt;
+      if (state !== "escaping") {                                      // 1. update (escaping flies straight out)
+        angle = angle + Math.sin(time * waveSpeed) * waveAmount * dt;  //    swing the heading
+        angle = angle + (Math.random() - 0.5) * wander * Math.sqrt(dt); //    plus a tiny random drift
+      }
+      updateState();                                            //    cage / escape steering
+      steerTowardFinger();                                      //    follow the finger, if pressed
+      if (pressed) bounceTarget = null;                         //    pressing cancels a bounce in progress
+      if (bounceTarget !== null) {                              //    in the middle of a bounce?
+        turnToward(bounceTarget, bounceTurnRate * dt);               //    keep turning away from the wall
+        if (Math.abs(angleBetween(bounceTarget, angle)) < 0.05) bounceTarget = null;  // done turning
+      }
+
+      const moveSpeed = state === "escaping" ? escapeSpeed : speed;
+      x = x + Math.cos(angle) * moveSpeed * unit * dragonScale * dt; //    move the head (smaller dragon = slower)
+      y = y + Math.sin(angle) * moveSpeed * unit * dragonScale * dt;
+      if (!pressed && state === "free") checkEdges();  //    handle the walls (not while caged, escaping or circling the cursor)
+      if (dragonIsOut) followTheLeader();              //    pull the body along (free: like a rope)
+      else followThePath();                            //    (in the cage: exactly along the head's path)
+
+      pen.clearRect(0, 0, screenW, screenH);  // 2. erase everything
+
+      // the cage: back behind the dragon; once open, the open front is also behind it,
+      // because the dragon is flying out toward you. After the escape it fades away.
+      const cageAlpha = state === "free" && cageFadesAway ? 1 - stateTime / fadeFrames : 1;
+      drawCage(cageBackImg, cageAlpha);
+      if (state !== "caged" && dragonIsOut) drawCage(cageOpenImg, cageAlpha);  // out: open front goes behind
+
+      // 3. draw the body from the tail forward, so the head ends up on top
+      for (let i = body.length - 1; i >= 0; i--) {
+        const seg = body[i];
+        const front = i === 0 ? { x: x, y: y } : body[i - 1];        // the one it follows
+        const direction = Math.atan2(front.y - seg.y, front.x - seg.x); // point toward it
+        const t = i / body.length;                 // 0 near the head, almost 1 at the tail
+        const size = radius * unit * 2.8 * (1 - t * 0.6) * dragonScale; // segments get smaller toward the tail
+        updateRoll(seg, direction);
+        if (i === body.length - 1) {
+          drawPicture(tailImg, seg.x, seg.y, direction, size * 1.6, seg.roll);  // the last one is the tail tip
+        } else {
+          drawPicture(bodyPattern[i % bodyPattern.length], seg.x, seg.y, direction, size, seg.roll);
+        }
+      }
+      headLook = headLook + angleBetween(angle, headLook) * (1 - Math.pow(1 - headSmoothing, dt));  // ease toward the heading
+      updateRoll(head, headLook);
+      drawPicture(headImg, x, y, headLook, radius * unit * 4 * dragonScale, head.roll);  // the head
+
+      if (state === "caged") {                          // locked in: front bars and lock over the dragon
+        drawCage(cageFrontImg, 1);
+        drawCage(lockImg, 1);
+      } else if (!dragonIsOut) {                        // leaving: the open front stays over the dragon
+        drawCage(cageOpenImg, 1);
+        dragonIsOut = isOutOfCage();                    // is the very last part out yet?
+      }
+
+      // while pressed, show a faint ring where it will circle (delete this to hide it)
+    //   if (pressed) {
+    //     pen.strokeStyle = "rgba(255, 255, 255, 0.15)";
+    //     pen.beginPath();
+    //     pen.arc(targetX, targetY, orbitRadius, 0, Math.PI * 2);
+    //     pen.stroke();
+    //   }
+
+      requestAnimationFrame(frame);                    // 4. ask for the next page
+    }
+    frame();
+  </script>
+</body>
+</html>
