@@ -238,6 +238,10 @@
         seg.x = seg.x + dx;
         seg.y = seg.y + dy;
       }
+      for (const point of trail) {   // the path the body follows while leaving the cage moves too
+        point.x = point.x + dx;
+        point.y = point.y + dy;
+      }
     }
 
     // --- what happens at the edges of the screen ---
@@ -431,7 +435,7 @@
       const moveSpeed = state === "escaping" ? escapeSpeed : speed;
       x = x + Math.cos(angle) * moveSpeed * unit * dragonScale * dt; //    move the head (smaller dragon = slower)
       y = y + Math.sin(angle) * moveSpeed * unit * dragonScale * dt;
-      if (!pressed && state === "free") checkEdges();  //    handle the walls (not while caged, escaping or circling the cursor)
+      if (!pressed && (state === "free" || state === "escaping")) checkEdges();  //    handle the walls (not while caged or circling the cursor)
       if (dragonIsOut) followTheLeader();              //    pull the body along (free: like a rope)
       else followThePath();                            //    (in the cage: exactly along the head's path)
 
