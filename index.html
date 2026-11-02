@@ -183,7 +183,7 @@
         }
         return;
       }
-      if (state === "opening" || state === "escaping") return;  // no steering until it's out
+      if (state === "opening") return;  // no steering until it's set off on the exitLift direction
       pressed = true;
       targetX = event.clientX;
       targetY = event.clientY;
@@ -261,7 +261,7 @@
       // near the left or right wall, while heading into it? (and not already bouncing)
       const touchingSide = (movingRight && x + zone >= w) || (!movingRight && x - zone <= 0);
       if (touchingSide && !passingSide && bounceTarget === null) {
-        if (!pressed && Math.random() < bounceChance) {  // never bounce while circling the cursor, only wrap
+        if (!dragonIsOut || (!pressed && Math.random() < bounceChance)) {  // still leaving the cage: always bounce (even when pressed); otherwise never bounce while circling the cursor
           bounceTarget = Math.PI - angle;  // bounce: start turning toward the mirrored direction
         } else {
           passingSide = true;       // wrap: let it slide out
@@ -275,7 +275,7 @@
       // near the ceiling or floor, while heading into it? (and not already bouncing)
       const touchingTopBottom = (movingDown && y + zone >= h) || (!movingDown && y - zone <= 0);
       if (touchingTopBottom && !passingTopBottom && bounceTarget === null) {
-        if (!pressed && Math.random() < bounceChance) {  // never bounce while circling the cursor, only wrap
+        if (!dragonIsOut || (!pressed && Math.random() < bounceChance)) {  // still leaving the cage: always bounce (even when pressed); otherwise never bounce while circling the cursor
           bounceTarget = -angle;           // bounce: start turning toward the mirrored direction
         } else {
           passingTopBottom = true;  // wrap: let it slide out
@@ -425,8 +425,9 @@
         angle = angle + (Math.random() - 0.5) * wander * Math.sqrt(dt); //    plus a tiny random drift
       }
       updateState();                                            //    cage / escape steering
-      steerTowardFinger();                                      //    follow the finger, if pressed
-      if (pressed) bounceTarget = null;                         //    pressing cancels a bounce in progress
+      const leavingBounce = !dragonIsOut && bounceTarget !== null;  //    leaving the cage and bouncing: the wall wins
+      if (!leavingBounce) steerTowardFinger();                  //    follow the finger, if pressed
+      if (pressed && dragonIsOut) bounceTarget = null;          //    once out, pressing cancels a bounce in progress
       if (bounceTarget !== null) {                              //    in the middle of a bounce?
         turnToward(bounceTarget, bounceTurnRate * dt);               //    keep turning away from the wall
         if (Math.abs(angleBetween(bounceTarget, angle)) < 0.05) bounceTarget = null;  // done turning
@@ -435,7 +436,8 @@
       const moveSpeed = state === "escaping" ? escapeSpeed : speed;
       x = x + Math.cos(angle) * moveSpeed * unit * dragonScale * dt; //    move the head (smaller dragon = slower)
       y = y + Math.sin(angle) * moveSpeed * unit * dragonScale * dt;
-      if (!pressed && (state === "free" || state === "escaping")) checkEdges();  //    handle the walls (not while caged or circling the cursor)
+      const wallsOn = state === "free" || state === "escaping";
+      if (wallsOn && (!pressed || !dragonIsOut)) checkEdges(); //    handle the walls (not while caged, or circling the cursor once out)
       if (dragonIsOut) followTheLeader();              //    pull the body along (free: like a rope)
       else followThePath();                            //    (in the cage: exactly along the head's path)
 
