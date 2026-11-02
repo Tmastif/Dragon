@@ -7,6 +7,13 @@
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #15161c; }
     canvas { display: block; touch-action: none; } /* dragging a finger won't scroll or zoom the page */
+    /* long press on iPhone: no text selection, no magnifying glass, no "save image" pop-up */
+    html, body, canvas {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
   </style>
 </head>
 <body>
@@ -40,6 +47,10 @@
     }
     resize();
     window.addEventListener("resize", resize);
+
+    // --- stop the phone's own long-press actions (magnifier, menu); our pointer events still work ---
+    board.addEventListener("touchstart", (event) => event.preventDefault(), { passive: false });
+    board.addEventListener("contextmenu", (event) => event.preventDefault());
 
     // --- the pictures (drawn facing RIGHT, belly down; the tail tip points LEFT) ---
     function loadPicture(file) {
